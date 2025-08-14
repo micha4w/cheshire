@@ -110,6 +110,7 @@ module cmd_write (
         tx_ongoing_d = 1'b0;
       end
 
+      default: ;
     endcase
   end : cmd_tx_datapath
 
@@ -158,7 +159,7 @@ module cmd_write (
   );
 
   counter #(
-    .WIDTH            (3'd6), //6 bit counter (48 bits to transmit)
+    .WIDTH            (6), //6 bit counter (48 bits to transmit)
     .STICKY_OVERFLOW  (1'b0)  //overflow not needed
   ) i_tx_bits_counter (
     .clk_i      (clk_i),

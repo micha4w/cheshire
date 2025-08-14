@@ -69,7 +69,7 @@ static inline uint32_t be32toh(uint32_t in) {
             ((in & 0xff000000) >> 24);
 }
 
-#define ASSERT_OK(call) { int err = (call); if (err != 0) { printf(#call " errored with err=%x\n", err); return err; } }
+#define ASSERT_OK(call) { int err = (call); if (err != 0) { printf(#call " errored with err=%x\n", err); uart_write_flush(&__base_uart); return err; } }
 
 // static inline void* _memset(void* data, uint8_t x, size_t size)
 // {

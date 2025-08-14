@@ -59,6 +59,14 @@ module cmd_wrap (
   logic start_tx_q, start_tx_d;
   `FF(start_tx_q, start_tx_d, 1'b0, clk_i, rst_ni);
 
+  //high if were running AUTO CMD12
+  logic running_cmd12_q, running_cmd12_d;
+  `FF(running_cmd12_q, running_cmd12_d, '0, clk_i, rst_ni);
+
+  //high if we are in READ_RSP_BUSY and received rsp_valid
+  logic wait_for_busy_q, wait_for_busy_d;
+  `FFL(wait_for_busy_q, wait_for_busy_d, clk_en_p_i, '0, clk_i, rst_ni);
+
   logic rsp_valid, tx_done;
 
   cmd_seq_state_e cmd_seq_state_d, cmd_seq_state_q;
@@ -76,23 +84,17 @@ module cmd_wrap (
           cmd_seq_state_d = (reg2hw.command.response_type_select.q == 2'b00) ? RSP_RECEIVED : BUS_SWITCH;
         end
       end
-      BUS_SWITCH:     cmd_seq_state_d = (reg2hw.command.response_type_select.q == 2'b11) ?  READ_RSP_BUSY : READ_RSP;
+      BUS_SWITCH:     cmd_seq_state_d = ((reg2hw.command.response_type_select.q == 2'b11) || running_cmd12_q) ?  READ_RSP_BUSY : READ_RSP;
 
       READ_RSP:       cmd_seq_state_d = (rsp_valid) ? RSP_RECEIVED : READ_RSP;
 
-      READ_RSP_BUSY:  cmd_seq_state_d = (dat0_i) ? RSP_RECEIVED : READ_RSP_BUSY;
+      READ_RSP_BUSY:  cmd_seq_state_d = (wait_for_busy_q && dat0_i) ? RSP_RECEIVED : READ_RSP_BUSY;
       
       RSP_RECEIVED:   cmd_seq_state_d = (cnt == 3'd7) ? READY : RSP_RECEIVED;
       
       default:        cmd_seq_state_d = READY;
     endcase
   end : cmd_sequence_next_state
-
-  logic [31:0] rsp_0, rsp_1, rsp_2, rsp_3;
-  logic [119:0] rsp;
-  logic long_rsp;
-
-  logic [5:0] command_index;
 
   
   `FFL(cmd_seq_state_q, cmd_seq_state_d, clk_en_p_i, READY, clk_i, rst_ni);
@@ -106,15 +108,14 @@ module cmd_wrap (
 
   logic end_bit_err, crc_corr, index_err;
 
-  logic running_cmd12_q, running_cmd12_d;
-  `FFL(running_cmd12_q, running_cmd12_d, clk_en_p_i, '0, clk_i, rst_ni);
+  logic rx_started_q, rx_started_d;
+  `FFL(rx_started_q, rx_started_d, clk_en_p_i, 0, clk_i, rst_ni);
+
   
   assign check_end_bit_err   = reg2hw.error_interrupt_status_enable.command_end_bit_error_status_enable.q;
   assign check_crc_err       = reg2hw.error_interrupt_status_enable.command_crc_error_status_enable.q & reg2hw.command.command_crc_check_enable.q;
   assign check_index_err     = reg2hw.error_interrupt_status_enable.command_index_error_status_enable.q & reg2hw.command.command_index_check_enable.q;
   assign check_timeout_error = reg2hw.error_interrupt_status_enable.command_timeout_error_status_enable.q;
-
-  assign index_err = (rsp [37:32] != command_index);
 
   
   always_comb begin : cmd_seq_ctrl
@@ -138,6 +139,9 @@ module cmd_wrap (
     sd_rsp_done_o = 1'b0;
     sd_cmd_done_o = 1'b0;
 
+    wait_for_busy_d = 1'b0;
+    rx_started_d    = 1'b0;
+
     unique case (cmd_seq_state_q)
       READY:;
       
@@ -152,7 +156,26 @@ module cmd_wrap (
         cnt_en  = 1'b1;
         cnt_clr = receiving;  //reset counter when we are receiving
 
-        if  (cnt >= 62) begin
+        if (cnt >= 62) command_timeout_error_o.de = check_timeout_error & clk_en_p_i;
+
+        if (rsp_valid) begin
+          command_end_bit_error_o.de = (check_end_bit_err & end_bit_err & clk_en_p_i);
+          command_crc_error_o.de     = (check_crc_err & ~crc_corr & clk_en_p_i);
+          command_index_error_o.de   = (check_index_err & index_err & clk_en_p_i);
+        end
+      end
+
+      READ_RSP_BUSY:  begin
+        wait_for_busy_d = wait_for_busy_q;
+        rx_started_d    = (receiving) ? '1 : rx_started_q;
+
+
+        //response should still start within 64 clock cycles, card may become busy during response
+        cnt_en  = 1'b1;
+        cnt_clr = rx_started_q;  //stop counter when we are receiving
+
+        
+        if  (cnt >= 63) begin
           //timeout interrupt if response didn't start within 64 clock cycles
 
           if (running_cmd12_q) auto_cmd12_errors_o.auto_cmd12_timeout_error.de = '1;
@@ -160,10 +183,12 @@ module cmd_wrap (
         end
 
         if (rsp_valid) begin
+          wait_for_busy_d = 1'b1;
+          
           if (running_cmd12_q) begin
-            auto_cmd12_errors_o.auto_cmd12_end_bit_error.de = end_bit_err;
-            auto_cmd12_errors_o.auto_cmd12_crc_error.de = ~crc_corr;
-            auto_cmd12_errors_o.auto_cmd12_index_error.de = index_err;
+            auto_cmd12_errors_o.auto_cmd12_end_bit_error.de = end_bit_err & clk_en_p_i;
+            auto_cmd12_errors_o.auto_cmd12_crc_error.de = ~crc_corr & clk_en_p_i;
+            auto_cmd12_errors_o.auto_cmd12_index_error.de = index_err & clk_en_p_i;
           end else begin
             command_end_bit_error_o.de = (check_end_bit_err & end_bit_err & clk_en_p_i);
             command_crc_error_o.de     = (check_crc_err & ~crc_corr & clk_en_p_i);
@@ -172,20 +197,13 @@ module cmd_wrap (
         end
       end
 
-      READ_RSP_BUSY:  begin
-        //response should still start within 64 clock cycles, card may become busy during response
-        cnt_en  = 1'b1;
-        cnt_clr = receiving;  //reset counter when we are receiving
-
-        if  (cnt >= 62) command_timeout_error_o.de = check_timeout_error & clk_en_p_i;
-      end
-
       RSP_RECEIVED:   begin
         cnt_en        = 1'b1;
         cnt_clr       = 1'b0;
         sd_rsp_done_o = 1'b1;
       end
 
+      default: ;
     endcase
   end : cmd_seq_ctrl
 
@@ -214,6 +232,7 @@ module cmd_wrap (
 
   assign sd_cmd_dat_busy_o = dat_busy_q;
 
+  logic [5:0] command_index;
   assign command_index = running_cmd12_q ? 6'd12 : reg2hw.command.command_index.q;
 
 
@@ -233,8 +252,7 @@ module cmd_wrap (
     cmd12_requested_d      = cmd12_requested_q | request_cmd12_i;
     
     running_cmd12_d = running_cmd12_q;
-    start_tx_d      = '0;
-    
+    start_tx_d      = start_tx_q;
 
     if (!rst_ni) begin
       command_inhibit_cmd_o.de = '1;
@@ -252,45 +270,47 @@ module cmd_wrap (
     end
 
     if (cmd_seq_state_q == READY) begin
-      running_cmd12_d = '0;
-      if (cmd12_requested_q) begin
-        if (
-          reg2hw.error_interrupt_status.command_index_error.q ||
-          reg2hw.error_interrupt_status.command_end_bit_error.q ||
-          reg2hw.error_interrupt_status.command_crc_error.q ||
-          reg2hw.error_interrupt_status.command_timeout_error.q
-        ) begin //prior command failed, do not execute auto cmd 12
-          cmd12_requested_d = '0;
-          auto_cmd12_errors_o.auto_cmd12_not_executed.de = '1;
-        end else begin //execute auto comd 12
-          start_tx_d      = '1;
-          running_cmd12_d = '1;
-        end
+      if (!start_tx_q) begin
+        running_cmd12_d = '0;
+        if (cmd12_requested_q) begin
+          if (
+            reg2hw.error_interrupt_status.command_index_error.q ||
+            reg2hw.error_interrupt_status.command_end_bit_error.q ||
+            reg2hw.error_interrupt_status.command_crc_error.q ||
+            reg2hw.error_interrupt_status.command_timeout_error.q
+          ) begin //prior command failed, do not execute auto cmd 12
+            cmd12_requested_d = '0;
+            auto_cmd12_errors_o.auto_cmd12_not_executed.de = '1;
+          end else begin //execute auto comd 12
+            start_tx_d      = '1;
+            running_cmd12_d = '1;
+          end
 
-      end else if (driver_cmd_requested_q) begin
-        if (
-          reg2hw.auto_cmd12_error_status.auto_cmd12_index_error.q ||
-          reg2hw.auto_cmd12_error_status.auto_cmd12_end_bit_error.q ||
-          reg2hw.auto_cmd12_error_status.auto_cmd12_crc_error.q ||
-          reg2hw.auto_cmd12_error_status.auto_cmd12_timeout_error.q
-        ) begin //prior auto cmd 12 failed, do not execute cmd
-          driver_cmd_requested_d = '0;
-          auto_cmd12_errors_o.command_not_issued_by_auto_cmd12_error.de = '1;
-        end else begin //execute cmd
-          start_tx_d = '1;
-        end
+        end else if (driver_cmd_requested_q) begin
+          if (
+            reg2hw.auto_cmd12_error_status.auto_cmd12_index_error.q ||
+            reg2hw.auto_cmd12_error_status.auto_cmd12_end_bit_error.q ||
+            reg2hw.auto_cmd12_error_status.auto_cmd12_crc_error.q ||
+            reg2hw.auto_cmd12_error_status.auto_cmd12_timeout_error.q
+          ) begin //prior auto cmd 12 failed, do not execute cmd
+            driver_cmd_requested_d = '0;
+            auto_cmd12_errors_o.command_not_issued_by_auto_cmd12_error.de = '1;
+          end else begin //execute cmd
+            start_tx_d = '1;
+          end
 
-      end else if (!reg2hw.command.command_index.qe) begin
-        command_inhibit_cmd_o.de = '1;
-        command_inhibit_cmd_o.d  = '0;
-        dat_busy_d = '0;
+        end else if (!reg2hw.command.command_index.qe) begin
+          command_inhibit_cmd_o.de = '1;
+          command_inhibit_cmd_o.d  = '0;
+          dat_busy_d = '0;
+        end
       end
 
     end else if (start_tx_q) begin// Request received by sdclk domain, transmission has started
-
-      if (cmd12_requested_q) begin
+      start_tx_d = '0;
+      if (running_cmd12_q) begin
         cmd12_requested_d = '0;
-      end else if (driver_cmd_requested_q) begin
+      end else begin
         driver_cmd_requested_d = '0;
       end
     end
@@ -298,38 +318,44 @@ module cmd_wrap (
   end : start_tx_cdc
 
 
+  logic [31:0] rsp0, rsp1, rsp2, rsp3;
+  logic [119:0] rsp;
+  logic long_rsp;
+
+  assign index_err = (rsp [37:32] != command_index);
+
   logic update_rsp_reg;
 
   always_comb begin : rsp_assignment
 
-    rsp_0 = reg2hw.response0.q;
-    rsp_1 = reg2hw.response1.q;
-    rsp_2 = reg2hw.response2.q;
-    rsp_3 = reg2hw.response3.q;
+    rsp0 = reg2hw.response0.q;
+    rsp1 = reg2hw.response1.q;
+    rsp2 = reg2hw.response2.q;
+    rsp3 = reg2hw.response3.q;
     update_rsp_reg  = 1'b0; //only update response register when there was a response
 
     if (running_cmd12_q) begin //auto cmd 12 response goes to upper word of rsp register
-        rsp_3 = rsp [31:0];
+        rsp3 = rsp [31:0];
     end else begin
       
       unique case (reg2hw.command.response_type_select.q)
         2'b00:;      //no response
 
         2'b01:  begin //long response
-          rsp_0 = rsp [31:0];
-          rsp_1 = rsp [63:32];
-          rsp_2 = rsp [95:64];
-          rsp_3 [23:0]  = rsp [119:96]; //save bits 31:24 of rsp_3
+          rsp0 = rsp [31:0];
+          rsp1 = rsp [63:32];
+          rsp2 = rsp [95:64];
+          rsp3 [23:0]  = rsp [119:96]; //save bits 31:24 of rsp3
           update_rsp_reg = 1'b1;
         end 
 
         2'b10:  begin //short response without busy signaling
-          rsp_0 = rsp [31:0];
+          rsp0 = rsp [31:0];
           update_rsp_reg = 1'b1;
         end
 
         2'b11:  begin //short response with busy signaling
-          rsp_0 = rsp [31:0];
+          rsp0 = rsp [31:0];
           update_rsp_reg = 1'b1;
         end
 
@@ -337,10 +363,10 @@ module cmd_wrap (
       endcase
     end
 
-    response0_d_o  = rsp_0;
-    response1_d_o  = rsp_1;
-    response2_d_o  = rsp_2;
-    response3_d_o  = rsp_3;
+    response0_d_o  = rsp0;
+    response1_d_o  = rsp1;
+    response2_d_o  = rsp2;
+    response3_d_o  = rsp3;
 
     response0_de_o = (update_rsp_reg & rsp_valid & clk_en_p_i);
     response1_de_o = (update_rsp_reg & rsp_valid & clk_en_p_i);
@@ -362,7 +388,7 @@ module cmd_wrap (
     
     .cmd_o          (sd_bus_cmd_o),
     .cmd_en_o       (sd_bus_cmd_en_o),
-    .start_tx_i     (start_tx_q), //need to buffer when registers run faster than sd cmd_write
+    .start_tx_i     (start_tx_q), //need to buffer when registers run faster than cmd_write
     .cmd_argument_i (running_cmd12_q ? '0 : reg2hw.argument.q),
     .cmd_nr_i       (command_index),
     .cmd_phase_i    (cmd_phase_q),

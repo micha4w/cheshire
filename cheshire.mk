@@ -177,9 +177,7 @@ $(CHS_ROOT)/hw/future/sdhci/model/sd_crc_16.v: | $(CHS_ROOT)/hw/future/sdhci/mod
 	wget https://raw.githubusercontent.com/fabriziotappero/ip-cores/refs/heads/communication_controller_wishbone_sd_card_controller/rtl/verilog/sd_crc_16.v -O $@
 
 $(CHS_ROOT)/hw/future/sdhci/model/sdModel.v: | $(CHS_ROOT)/hw/future/sdhci/model
-	wget https://gist.githubusercontent.com/micha4w/38fad58c1cea3157f204709d4eca227e/raw/caae42ff7ac4781d23fb36e8e16a3e52259fdcc8/sdModel.v -O $@
-	sed -i '181d' $@
-	sed -i '98i reg doingACMD51;' $@
+	wget https://gist.githubusercontent.com/micha4w/38fad58c1cea3157f204709d4eca227e/raw/204d292e66eddfcb69e4e5eba138587042bc3641/sdModel.v -O $@
 
 
 CHS_SIM_ALL += $(CHS_ROOT)/target/sim/models/s25fs512s.v

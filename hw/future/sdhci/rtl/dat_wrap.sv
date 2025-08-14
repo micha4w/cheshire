@@ -36,6 +36,14 @@ module dat_wrap #(
   output `writable_reg_t([15:0]) block_count_o
 );
 
+  logic buffer_write_ready, buffer_write_valid, buffer_read_ready, buffer_read_valid, buffer_empty;
+  logic [31:0] buffer_write_data, buffer_read_data;
+  logic start_read, read_valid, read_done, read_crc_err, read_end_bit_err, read_timeout;
+  logic write_done;
+
+  logic [15:0] transmitted_block_counter_q, transmitted_block_counter_d;
+  `FF (transmitted_block_counter_q, transmitted_block_counter_d, '0);
+
   typedef enum logic [3:0] {
     READY,
 
@@ -60,23 +68,6 @@ module dat_wrap #(
 
   dat_state_e state_q, state_d;
   `FF (state_q, state_d, READY, clk_i, rst_ni);
-
-  logic buffer_write_operation, buffer_read_operation;
-  logic buffer_write_ready, buffer_write_valid, buffer_read_ready, buffer_read_valid, buffer_empty;
-  logic [31:0] buffer_write_data, buffer_read_data;
-
-  logic start_read, read_valid, read_done, read_crc_err, read_end_bit_err;
-  logic [31:0] read_data;
-
-  logic start_write, write_requests_next_word, write_done, write_crc_err, write_end_bit_err;
-  logic [31:0] write_data;
-
-  logic [MaxBlockBitSize-1:0] reg_start_length_q, reg_start_length_d;
-  logic [MaxBlockBitSize-1:0] block_size;
-  logic rsp_done_q, rsp_done_d;
-  logic [15:0] transmitted_block_counter_q, transmitted_block_counter_d;
-
-  logic read_timeout;
 
   always_comb begin
     state_d = state_q;
@@ -126,21 +117,24 @@ module dat_wrap #(
       default: state_d = READY;
     endcase
   end
-  
-  `FF (reg_start_length_q, reg_start_length_d, '0, clk_i, rst_ni)
 
+  logic [MaxBlockBitSize-1:0] block_size;
   assign block_size = MaxBlockBitSize'(reg2hw_i.block_size.transfer_block_size.q);
 
-  `FF (rsp_done_q, rsp_done_d, '0, clk_i, rst_ni);
-
-  `FF (transmitted_block_counter_q, transmitted_block_counter_d, '0)
-
+  
   logic read_run_timeout;
+  logic start_write, write_requests_next_word, write_crc_err, write_end_bit_err;
+  logic [31:0] write_data, read_data;
+
+  logic requested_cmd12_q, requested_cmd12_d;
+  `FF(requested_cmd12_q, requested_cmd12_d, '0)
+
   always_comb begin
     read_run_timeout = '0;
 
-    request_cmd12_o  = '0;
-    pause_sd_clk_o   = '0;
+    request_cmd12_o   = '0;
+    requested_cmd12_d = '0;
+    pause_sd_clk_o    = '0;
 
     data_crc_error_o     = '{ de: '0, d: '1};
     data_end_bit_error_o = '{ de: '0, d: '1};
@@ -188,12 +182,17 @@ module dat_wrap #(
           data_end_bit_error_o.de = read_end_bit_err;
         end
       end
-      READING_BUSY: begin
-        read_transfer_active_o.d = '1;
-      end
       DONE_READING_BLOCK: begin
         read_transfer_active_o.d = '1;
         transmitted_block_counter_d = transmitted_block_counter_q - 1;
+      end
+      READING_BUSY: begin
+        read_transfer_active_o.d = '1;
+
+        if (reg2hw_i.transfer_mode.auto_cmd12_enable.q) begin
+          requested_cmd12_d = '1;
+          if (!requested_cmd12_q) request_cmd12_o = '1;
+        end
       end
       TIMEOUT_READING: begin
         read_transfer_active_o.d = '1;
@@ -201,8 +200,6 @@ module dat_wrap #(
       end
       DONE_READING: begin
         read_transfer_active_o.d = '1;
-
-        if (reg2hw_i.transfer_mode.auto_cmd12_enable.q) request_cmd12_o = '1;
       end
 
       WAIT_FOR_RSP: begin
@@ -252,9 +249,10 @@ module dat_wrap #(
     .timeout_o      (read_timeout)
   );
 
-
+  
   dat_buffer #(
-    .NumWords        (256), // = 1024, Just enough to double buffer 512 byte blocks
+    // .NumWords        (256), // = 1024, Just enough to double buffer 512 byte blocks
+    .NumWords        (512), // = 2048, because ihp13 doesnt have a 1kB SRAM block with 32bit word width
     .MaxBlockBitSize (MaxBlockBitSize)
   ) i_dat_buffer (
     .clk_i,

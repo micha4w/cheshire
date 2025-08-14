@@ -5,6 +5,7 @@
 // Authors:
 // - Philippe Sauter <phsauter@iis.ee.ethz.ch>
 
+#include "dif/clint.h"
 #include "dif/uart.h"
 #include "printf.h"
 #include "dif/util.h"
@@ -15,7 +16,7 @@
 #include "regs/cheshire.h"
 #include "params.h"
 
-#define SDHCI_BASE_ADDR 0x0300a000
+#define SDHCI_BASE_ADDR 0x01001000
 
 struct sdmmc_softc sc = { 0 };
 struct sdhc_host hp = { 0 };
@@ -78,20 +79,23 @@ int test_rw(int size, unsigned int seed) {
 }
 
 int main() {
-    uint32_t rtc_freq = *reg32(&__base_regs, CHESHIRE_RTC_FREQ_REG_OFFSET);
+    uint32_t rtc_freq = *reg32((unsigned int) &__base_regs, CHESHIRE_RTC_FREQ_REG_OFFSET);
     uint64_t reset_freq = clint_get_core_freq(rtc_freq, 2500);
     uart_init(&__base_uart, reset_freq, 1000000);
-    
-    printf("Hello world!\n");
 
+    printf("Hello world!\n");
+    
 
 #ifdef SDHC_DEBUG
-    debug_funcs = 0;
-    sdhcdebug = 0;
+    debug_funcs = 1;
+    sdhcdebug = 2;
 #endif
 
 
-ASSERT_OK(sdhc_init(&hp, SDHCI_BASE_ADDR, 0, 0));
+    ASSERT_OK(sdhc_init(&hp, SDHCI_BASE_ADDR, 0, 0));
+
+#define WITH_SD_MODEL
+// #define SDHC_INITIALIZED_MODEL
 
 #ifdef WITH_SD_MODEL
     ASSERT_OK(sdhc_bus_width(&hp, 4));
@@ -111,15 +115,15 @@ ASSERT_OK(sdhc_init(&hp, SDHCI_BASE_ADDR, 0, 0));
     sdmmc_init(&sc, &hp, scratch);
     if (!ISSET(sc.sc_flags, SMF_CARD_ATTACHED)) {
         printf("Failed to initialize SD Card\n");
+        uart_write_flush(&__base_uart);
         return 1;
     }
 #endif
 
-    ASSERT_OK(sdhc_bus_clock(sc.sch, SDMMC_SDCLK_50MHZ, SDMMC_TIMING_LEGACY));
+    ASSERT_OK(sdhc_bus_clock(sc.sch, SDMMC_SDCLK_25MHZ, SDMMC_TIMING_LEGACY));
 
 #ifdef WITH_SD_MODEL
-    if (sc.sc_card.csd.sector_size != 512)
-        ASSERT_OK(sdmmc_mem_set_blocklen(&sc, &sc.sc_card));
+    ASSERT_OK(sdmmc_mem_set_blocklen(&sc, &sc.sc_card));
 #endif
 
     // Single block RW
@@ -129,8 +133,8 @@ ASSERT_OK(sdhc_init(&hp, SDHCI_BASE_ADDR, 0, 0));
     ASSERT_OK(test_rw(BLOCKS*SIZE, 0x70EDADA1));
     // TODO half block rw?
 
-    printf("\n");
+    printf("Success\n");
     uart_write_flush(&__base_uart);
 
-    return 1;
+    return 0xC007;
 }
