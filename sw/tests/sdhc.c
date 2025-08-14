@@ -94,7 +94,7 @@ int main() {
 
     ASSERT_OK(sdhc_init(&hp, SDHCI_BASE_ADDR, 0, 0));
 
-#define WITH_SD_MODEL
+// #define WITH_SD_MODEL
 // #define SDHC_INITIALIZED_MODEL
 
 #ifdef WITH_SD_MODEL
